@@ -1,0 +1,606 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: '3-Tier Web Application - VPC, RDS, EC2 Auto Scaling, and Application Load Balancer'
+
+Parameters:
+  KeyPairName:
+    Description: EC2 Key Pair for SSH access (optional, leave empty to skip)
+    Type: String
+    Default: ''
+  
+  DBPassword:
+    Description: Database master password (8-41 characters)
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    MaxLength: 41
+    AllowedPattern: '[a-zA-Z0-9!@#$%^&*()_+=-]*'
+    ConstraintDescription: Must be 8-41 alphanumeric characters
+  
+  DBUsername:
+    Description: Database master username
+    Type: String
+    Default: admin
+    MinLength: 1
+    MaxLength: 16
+    AllowedPattern: '[a-zA-Z][a-zA-Z0-9]*'
+    ConstraintDescription: Must begin with a letter and contain only alphanumeric characters
+
+  ASGDesiredCapacity:
+    Description: Initial desired capacity for the Auto Scaling Group (use 0 then update to 2 after uploading app files to S3)
+    Type: Number
+    Default: 2
+    MinValue: 0
+    MaxValue: 4
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, '']]
+
+Resources:
+  # ============================================================================
+  # VPC CONFIGURATION
+  # ============================================================================
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    DeletionPolicy: Delete
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: 3tier-vpc
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    DeletionPolicy: Delete
+    Properties:
+      Tags:
+        - Key: Name
+          Value: 3tier-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ============================================================================
+  # PUBLIC SUBNETS (for ALB)
+  # ============================================================================
+  
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: 3tier-alb-publicA
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: 3tier-alb-publicB
+
+  # ============================================================================
+  # PRIVATE SUBNETS (for Application)
+  # ============================================================================
+  
+  PrivateAppSubnet1:
+    Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: 3tier-app-privateA
+
+  PrivateAppSubnet2:
+    Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: 3tier-app-privateB
+
+  # ============================================================================
+  # PRIVATE SUBNETS (for Database)
+  # ============================================================================
+  
+  PrivateDBSubnet1:
+    Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.21.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: 3tier-db-privateA
+
+  PrivateDBSubnet2:
+    Type: AWS::EC2::Subnet
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.22.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: 3tier-db-privateB
+
+  # ============================================================================
+  # NAT GATEWAY (Single NAT for cost savings)
+  # ============================================================================
+  
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    DeletionPolicy: Delete
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: 3tier-nat-eip
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    DeletionPolicy: Delete
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: 3tier-natgw
+
+  # ============================================================================
+  # ROUTE TABLES
+  # ============================================================================
+  
+  # Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 3tier-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    DeletionPolicy: Delete
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private Route Table for App Subnets
+  PrivateAppRouteTable:
+    Type: AWS::EC2::RouteTable
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 3tier-app-private-rt
+
+  PrivateAppRoute:
+    Type: AWS::EC2::Route
+    DeletionPolicy: Delete
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateAppSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
+    Properties:
+      SubnetId: !Ref PrivateAppSubnet1
+      RouteTableId: !Ref PrivateAppRouteTable
+
+  PrivateAppSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
+    Properties:
+      SubnetId: !Ref PrivateAppSubnet2
+      RouteTableId: !Ref PrivateAppRouteTable
+
+  # Private Route Table for DB Subnets (No internet access)
+  PrivateDBRouteTable:
+    Type: AWS::EC2::RouteTable
+    DeletionPolicy: Delete
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: 3tier-db-private-rt
+
+  PrivateDBSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
+    Properties:
+      SubnetId: !Ref PrivateDBSubnet1
+      RouteTableId: !Ref PrivateDBRouteTable
+
+  PrivateDBSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DeletionPolicy: Delete
+    Properties:
+      SubnetId: !Ref PrivateDBSubnet2
+      RouteTableId: !Ref PrivateDBRouteTable
+
+  # ============================================================================
+  # SECURITY GROUPS
+  # ============================================================================
+  
+  # ALB Security Group
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      GroupDescription: Security group for Application Load Balancer
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP from internet
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS from internet
+      Tags:
+        - Key: Name
+          Value: 3tier-alb-sg
+
+  # Application Security Group
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      GroupDescription: Security group for application servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Allow HTTP from ALB
+      Tags:
+        - Key: Name
+          Value: 3tier-app-sg
+
+  # RDS Security Group
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DeletionPolicy: Delete
+    Properties:
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: Allow MySQL from application layer
+      Tags:
+        - Key: Name
+          Value: 3tier-rds-sg
+
+  # ============================================================================
+  # RDS DATABASE
+  # ============================================================================
+  
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    DeletionPolicy: Delete
+    Properties:
+      DBSubnetGroupName: tier3-db-subnet-group
+      DBSubnetGroupDescription: Subnet group for 3-tier application database
+      SubnetIds:
+        - !Ref PrivateDBSubnet1
+        - !Ref PrivateDBSubnet2
+      Tags:
+        - Key: Name
+          Value: tier3-db-subnet-group
+
+  RDSInstance:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: tier3-app-db
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: '8.0.45'
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      AllocatedStorage: '20'
+      StorageType: gp3
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      PubliclyAccessible: false
+      DBName: appdb
+      BackupRetentionPeriod: 0
+      MultiAZ: true
+      Tags:
+        - Key: Name
+          Value: tier3-app-db
+
+  # ============================================================================
+  # IAM ROLE FOR EC2
+  # ============================================================================
+  
+  EC2Role:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Delete
+    Properties:
+      RoleName: tier3-app-ec2-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Tags:
+        - Key: Name
+          Value: tier3-app-ec2-role
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    DeletionPolicy: Delete
+    Properties:
+      InstanceProfileName: tier3-app-ec2-profile
+      Roles:
+        - !Ref EC2Role
+
+  # ============================================================================
+  # S3 BUCKET FOR APP ASSETS (PHP files - uploaded by create-stack script)
+  # ============================================================================
+
+  AppBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Name
+          Value: tier3-app-assets
+
+  # EC2 role can read app files from S3
+  EC2RoleAppBucketPolicy:
+    Type: AWS::IAM::Policy
+    DeletionPolicy: Delete
+    Properties:
+      PolicyName: tier3-app-s3-read
+      Roles:
+        - !Ref EC2Role
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub '${AppBucket.Arn}/*'
+
+  # ============================================================================
+  # LAUNCH TEMPLATE
+  # ============================================================================
+  
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    DependsOn: [RDSInstance, AppBucket]
+    DeletionPolicy: Delete
+    Properties:
+      LaunchTemplateName: tier3-app-template
+      LaunchTemplateData:
+        ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}'
+        InstanceType: t2.micro
+        KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref 'AWS::NoValue']
+        IamInstanceProfile:
+          Arn: !GetAtt EC2InstanceProfile.Arn
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -e
+            exec > >(tee /var/log/user-data.log) 2>&1
+            echo "===> Starting user data at $(date)"
+            yum update -y
+            yum install -y httpd php php-mysqlnd
+            yum install -y awscli || true
+            systemctl start httpd && systemctl enable httpd
+            BUCKET="${AppBucket}"
+            REGION="${AWS::Region}"
+            DB_ENDPOINT="${RDSInstance.Endpoint.Address}"
+            DB_USERNAME="${DBUsername}"
+            DB_PASSWORD="${DBPassword}"
+            DB_NAME="appdb"
+            echo "===> Downloading app from s3://$BUCKET"
+            aws s3 cp "s3://$BUCKET/index.php" /var/www/html/ --region "$REGION"
+            aws s3 cp "s3://$BUCKET/add-user.php" /var/www/html/ --region "$REGION"
+            aws s3 cp "s3://$BUCKET/users.php" /var/www/html/ --region "$REGION"
+            for f in /var/www/html/index.php /var/www/html/add-user.php /var/www/html/users.php; do
+              sed -i "s|DB_ENDPOINT_PLACEHOLDER|$DB_ENDPOINT|g" "$f"
+              sed -i "s|DB_USERNAME_PLACEHOLDER|$DB_USERNAME|g" "$f"
+              sed -i "s|DB_PASSWORD_PLACEHOLDER|$DB_PASSWORD|g" "$f"
+              sed -i "s|DB_NAME_PLACEHOLDER|$DB_NAME|g" "$f"
+            done
+            chown -R apache:apache /var/www/html/*.php
+            chmod 644 /var/www/html/*.php
+            echo "OK" > /var/www/html/health.html
+            systemctl restart httpd
+            echo "===> User data completed at $(date)"
+
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: 3tier-app-instance
+
+  # ============================================================================
+  # TARGET GROUP
+  # ============================================================================
+  
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DeletionPolicy: Delete
+    Properties:
+      Name: tier3-app-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckEnabled: true
+      HealthCheckPath: /health.html
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      TargetType: instance
+      Tags:
+        - Key: Name
+          Value: tier3-app-tg
+
+  # ============================================================================
+  # APPLICATION LOAD BALANCER
+  # ============================================================================
+  
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DeletionPolicy: Delete
+    Properties:
+      Name: tier3-app-alb
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: tier3-app-alb
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DeletionPolicy: Delete
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ============================================================================
+  # AUTO SCALING GROUP
+  # ============================================================================
+  
+  AutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    DependsOn: RDSInstance
+    DeletionPolicy: Delete
+    Properties:
+      AutoScalingGroupName: tier3-app-asg
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: 0
+      MaxSize: 4
+      DesiredCapacity: !Ref ASGDesiredCapacity
+      VPCZoneIdentifier:
+        - !Ref PrivateAppSubnet1
+        - !Ref PrivateAppSubnet2
+      TargetGroupARNs:
+        - !Ref TargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: 3tier-app-instance
+          PropagateAtLaunch: true
+
+# ============================================================================
+# OUTPUTS
+# ============================================================================
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+
+  LoadBalancerDNS:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  LoadBalancerURL:
+    Description: URL of the Application Load Balancer
+    Value: !Sub 'http://${ApplicationLoadBalancer.DNSName}'
+
+  RDSEndpoint:
+    Description: RDS Database Endpoint
+    Value: !GetAtt RDSInstance.Endpoint.Address
+
+  AutoScalingGroupName:
+    Description: Auto Scaling Group Name
+    Value: !Ref AutoScalingGroup
+
+  TargetGroupARN:
+    Description: Target Group ARN
+    Value: !Ref TargetGroup
+
+  AppBucketName:
+    Description: S3 bucket containing app PHP files (upload index.php, add-user.php, users.php from Resources/webapp/)
+    Value: !Ref AppBucket

@@ -1,0 +1,82 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Assignment 5 - Cross-account IAM role with least privilege for EC2, RDS, and KMS
+
+Parameters:
+  ExternalAccountId:
+    Type: String
+    Description: AWS Account ID that can assume this role
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: Must be a 12-digit AWS account ID
+
+  Ec2InstanceArn:
+    Type: String
+    Description: ARN of the EC2 instance (or ARN pattern) this role can manage
+
+  RdsInstanceArn:
+    Type: String
+    Description: ARN of the RDS instance this role can manage
+
+  KmsKeyArn:
+    Type: String
+    Description: ARN of the KMS key this role can use
+
+  ExternalId:
+    Type: String
+    Default: ''
+    Description: Optional external ID for added security (can be empty)
+
+Conditions:
+  HasExternalId: !Not [!Equals [!Ref ExternalId, ""]]
+
+Resources:
+  CrossAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CrossAccountOpsRole-${ExternalAccountId}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${ExternalAccountId}:root'
+            Action: sts:AssumeRole
+            Condition:
+              Fn::If:
+                - HasExternalId
+                - { StringEquals: { 'sts:ExternalId': !Ref ExternalId } }
+                - { }
+      MaxSessionDuration: 3600
+      Policies:
+        - PolicyName: Ec2RdsKmsLeastPrivilege
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Ec2ManageSpecificInstance
+                Effect: Allow
+                Action:
+                  - ec2:DescribeInstances
+                  - ec2:StartInstances
+                  - ec2:StopInstances
+                Resource: !Ref Ec2InstanceArn
+              - Sid: RdsManageSpecificInstance
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBInstances
+                  - rds:StartDBInstance
+                  - rds:StopDBInstance
+                Resource: !Ref RdsInstanceArn
+              - Sid: KmsUseSpecificKey
+                Effect: Allow
+                Action:
+                  - kms:Encrypt
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: !Ref KmsKeyArn
+
+Outputs:
+  CrossAccountRoleArn:
+    Description: ARN of the cross-account role
+    Value: !GetAtt CrossAccountRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CrossAccountRoleArn'
+

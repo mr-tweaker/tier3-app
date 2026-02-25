@@ -1,0 +1,150 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Assignment 1 - VPC, Subnet, EC2, and S3 with parameter groups and Banking project tags.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Network Configuration
+        Parameters:
+          - VpcCidr
+          - SubnetCidr
+      - Label:
+          default: EC2 Configuration
+        Parameters:
+          - InstanceType
+          - KeyName
+      - Label:
+          default: S3 Configuration
+        Parameters:
+          - BucketName
+    ParameterLabels:
+      VpcCidr:
+        default: VPC CIDR
+      SubnetCidr:
+        default: Subnet CIDR
+      InstanceType:
+        default: EC2 Instance Type
+      KeyName:
+        default: EC2 Key Pair
+      BucketName:
+        default: S3 Bucket Name
+
+Parameters:
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+
+  SubnetCidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR block for the subnet
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t3.micro
+      - t3.small
+    Description: EC2 instance type
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+
+  BucketName:
+    Type: String
+    Description: Globally unique S3 bucket name
+    AllowedPattern: '^[a-z0-9.-]{3,63}$'
+    ConstraintDescription: Must be a valid S3 bucket name
+
+Resources:
+  MyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-vpc'
+        - Key: Project
+          Value: Banking
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MyVPC
+      CidrBlock: !Ref SubnetCidr
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-subnet'
+        - Key: Project
+          Value: Banking
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-sg'
+        - Key: Project
+          Value: Banking
+
+  MyEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      # Use SSM public parameter for latest Amazon Linux 2 where available, account/region agnostic
+      ImageId: !Sub '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}'
+      KeyName: !Ref KeyName
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ec2'
+        - Key: Project
+          Value: Banking
+
+  MyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref BucketName
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-bucket'
+        - Key: Project
+          Value: Banking
+
+Outputs:
+  VpcId:
+    Description: Created VPC ID
+    Value: !Ref MyVPC
+
+  SubnetId:
+    Description: Created Subnet ID
+    Value: !Ref PublicSubnet
+
+  InstanceId:
+    Description: EC2 instance ID
+    Value: !Ref MyEC2Instance
+
+  BucketNameOut:
+    Description: Name of the created S3 bucket
+    Value: !Ref MyBucket
+
